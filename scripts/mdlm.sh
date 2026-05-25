@@ -12,11 +12,11 @@
 #SBATCH --open-mode=append            # Do not overwrite logs
 #SBATCH --requeue                     # Requeue upon preemption
 
-checkpoint_path=YOUR-BASE-PATH/remdm/outputs/checkpoints/mdlm.ckpt
+checkpoint_path=./remdm-shortcut-removal/weights/mdlm.ckpt
 T=0
 sampling_steps=1024
 p=0.9
-generated_seqs_path=YOUR-BASE-PATH/remdm/outputs/mdlm_T-${sampling_steps}_topp-${p}.json
+generated_seqs_path=./remdm-shortcut-removal/outputs/mdlm_T-${sampling_steps}_topp-${p}.json
 
 export HYDRA_FULL_ERROR=1
 

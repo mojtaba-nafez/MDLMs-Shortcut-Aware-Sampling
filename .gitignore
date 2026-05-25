@@ -1,3 +1,6 @@
 outputs
 watch_folder
 __pycache__
+
+data/
+weights/
