@@ -241,50 +241,170 @@ class DDiTBlock(nn.Module):
       return bias_dropout_add_scale_fused_inference
 
 
-  def forward(self, x, rotary_cos_sin, c, seqlens=None):
+  def forward(self, x, rotary_cos_sin, c, seqlens=None, remove_self_attn=False):
+    import torch.nn.functional as F
+
     batch_size, seq_len = x.shape[0], x.shape[1]
 
     bias_dropout_scale_fn = self._get_bias_dropout_scale()
 
-    (shift_msa, scale_msa, gate_msa, shift_mlp,
-     scale_mlp, gate_mlp) = self.adaLN_modulation(c)[:, None].chunk(6, dim=2)
+    (
+        shift_msa,
+        scale_msa,
+        gate_msa,
+        shift_mlp,
+        scale_mlp,
+        gate_mlp
+    ) = self.adaLN_modulation(c)[:, None].chunk(6, dim=2)
 
-    # attention operation
+    # =========================================================
+    # Attention
+    # =========================================================
+
     x_skip = x
-    x = modulate_fused(self.norm1(x), shift_msa, scale_msa)
+
+    x = modulate_fused(
+        self.norm1(x),
+        shift_msa,
+        scale_msa
+    )
+
+    # ---------------------------------------------------------
+    # QKV projection
+    # ---------------------------------------------------------
 
     qkv = self.attn_qkv(x)
-    qkv = rearrange(qkv,
-                    'b s (three h d) -> b s three h d',
-                    three=3,
-                    h=self.n_heads)
+
+    # [B, S, 3*D] -> [B, S, 3, H, Hd]
+    qkv = rearrange(
+        qkv,
+        'b s (three h d) -> b s three h d',
+        three=3,
+        h=self.n_heads
+    )
+
+    # ---------------------------------------------------------
+    # Rotary embeddings
+    # ---------------------------------------------------------
+
     with torch.cuda.amp.autocast(enabled=False):
-      cos, sin = rotary_cos_sin
-      qkv = apply_rotary_pos_emb(
-        qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
-    qkv = rearrange(qkv, 'b s ... -> (b s) ...')
-    if seqlens is None:
-      cu_seqlens = torch.arange(
-        0, (batch_size + 1) * seq_len, step=seq_len,
-        dtype=torch.int32, device=qkv.device)
+        cos, sin = rotary_cos_sin
+
+        qkv = apply_rotary_pos_emb(
+            qkv,
+            cos.to(qkv.dtype),
+            sin.to(qkv.dtype)
+        )
+
+    # ---------------------------------------------------------
+    # Handle both possible layouts
+    # ---------------------------------------------------------
+    #
+    # Layout A:
+    # [B, S, 3, H, D]
+    #
+    # Layout B:
+    # [B, S, H, 3, D]
+    #
+    # Some rotary implementations change the layout.
+    # ---------------------------------------------------------
+
+    if qkv.shape[2] == 3:
+        # [B, S, 3, H, D]
+        q = qkv[:, :, 0]
+        k = qkv[:, :, 1]
+        v = qkv[:, :, 2]
+
+    elif qkv.shape[3] == 3:
+        # [B, S, H, 3, D]
+        q = qkv[:, :, :, 0]
+        k = qkv[:, :, :, 1]
+        v = qkv[:, :, :, 2]
+
     else:
-      cu_seqlens = seqlens.cumsum(-1)
-    x = flash_attn.flash_attn_interface.flash_attn_varlen_qkvpacked_func(
-      qkv, cu_seqlens, seq_len, 0., causal=False)
-    
-    x = rearrange(x, '(b s) h d -> b s (h d)', b=batch_size)
+        raise RuntimeError(f"Unexpected qkv shape: {qkv.shape}")
 
-    x = bias_dropout_scale_fn(self.attn_out(x),
-                              None,
-                              gate_msa,
-                              x_skip,
-                              self.dropout)
+    # ---------------------------------------------------------
+    # [B, S, H, D] -> [B, H, S, D]
+    # ---------------------------------------------------------
 
-    # mlp operation
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
+
+    # ---------------------------------------------------------
+    # Create self-attention removal mask
+    # ---------------------------------------------------------
+
+    attn_bias = torch.zeros(
+        (seq_len, seq_len),
+        device=q.device,
+        dtype=q.dtype,
+    )
+
+    idx = torch.arange(seq_len, device=q.device)
+
+    if remove_self_attn:
+        # # Prevent token i attending to itself
+        attn_bias[idx, idx] = torch.finfo(q.dtype).min
+
+    # [1, 1, S, S]
+    attn_bias = attn_bias.unsqueeze(0).unsqueeze(0)
+
+    # ---------------------------------------------------------
+    # Attention
+    # ---------------------------------------------------------
+
+    x = F.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        attn_mask=attn_bias,
+        dropout_p=self.dropout if self.training else 0.0,
+        is_causal=False,
+    )
+
+    # ---------------------------------------------------------
+    # [B, H, S, D] -> [B, S, D]
+    # ---------------------------------------------------------
+
+    x = x.transpose(1, 2).contiguous()
+
+    x = rearrange(
+        x,
+        'b s h d -> b s (h d)'
+    )
+
+    # ---------------------------------------------------------
+    # Output projection + residual
+    # ---------------------------------------------------------
+
     x = bias_dropout_scale_fn(
-      self.mlp(modulate_fused(
-        self.norm2(x), shift_mlp, scale_mlp)),
-      None, gate_mlp, x, self.dropout)
+        self.attn_out(x),
+        None,
+        gate_msa,
+        x_skip,
+        self.dropout
+    )
+
+    # =========================================================
+    # MLP
+    # =========================================================
+
+    x = bias_dropout_scale_fn(
+        self.mlp(
+            modulate_fused(
+                self.norm2(x),
+                shift_mlp,
+                scale_mlp
+            )
+        ),
+        None,
+        gate_mlp,
+        x,
+        self.dropout
+    )
+
     return x
 
 
@@ -350,21 +470,34 @@ class DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
       config.model.cond_dim)
     self.scale_by_sigma = config.model.scale_by_sigma
 
+    self.remove_self_attn = config.model.remove_self_attn
+    print(f"remove_self_attn: {self.remove_self_attn}")
+
   def _get_bias_dropout_scale(self):
     if self.training:
       return bias_dropout_add_scale_fused_train
     else:
       return  bias_dropout_add_scale_fused_inference
 
-  def forward(self, indices, sigma):
+  def forward(self, indices, sigma, revise_step=False):
+    # print("indices:", indices)
     x = self.vocab_embed(indices)
+
+    mask_id = 50257
+    mask_weight = 0.8
+    if revise_step:
+        not_already_masked = (indices != mask_id).unsqueeze(-1)
+        mask_token_emb = self.vocab_embed([mask_id])
+        mixed_x = ((1 - mask_weight) * x) + (mask_weight * mask_token_emb.view(1, 1, -1))
+        x = torch.where(not_already_masked, mixed_x, x)
+
     c = F.silu(self.sigma_map(sigma))
 
     rotary_cos_sin = self.rotary_emb(x)
 
     with torch.cuda.amp.autocast(dtype=torch.bfloat16):
       for i in range(len(self.blocks)):
-        x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
+        x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None, remove_self_attn=self.remove_self_attn)
       x = self.output_layer(x, c)
 
     return x

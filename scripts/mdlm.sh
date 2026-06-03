@@ -1,29 +1,54 @@
-#!/bin/bash
-#SBATCH -J mdlm                       # Job name
-#SBATCH -o watch_folder/%x_%j.out     # log file (out & err)
-#SBATCH -N 1                          # Total number of nodes requested
-#SBATCH --get-user-env                # retrieve the users login environment
-#SBATCH --mem=32000                   # server memory requested (per node)
-#SBATCH -t 960:00:00                  # Time limit (hh:mm:ss)
-#SBATCH --partition=gpu               # Request partition
-#SBATCH --constraint="[3090|a5000|a6000|a100]"
-#SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:1                  # Type/number of GPUs needed
-#SBATCH --open-mode=append            # Do not overwrite logs
-#SBATCH --requeue                     # Requeue upon preemption
+#!/usr/bin/env bash
 
-checkpoint_path=./remdm-shortcut-removal/weights/mdlm.ckpt
+set -euo pipefail
+
+echo "Current directory: $(pwd)"
+
+export PYTHONPATH=".:${PYTHONPATH:-}"
+export HF_ALLOW_CODE_EVAL=1
+export HF_DATASETS_TRUST_REMOTE_CODE=1
+
+# ===== Optional but recommended for stability and debugging =====
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export NCCL_DEBUG=warn
+export TORCH_DISTRIBUTED_DEBUG=DETAIL
+
+remove_self_attn=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --remove_self_attn)
+            remove_self_attn="$2"
+            shift 2
+            ;;
+        *)
+            echo "Unknown argument: $1"
+            exit 1
+            ;;
+    esac
+done
+
+
+checkpoint_path=weights/mdlm.ckpt
+
 T=0
 sampling_steps=1024
 p=0.9
-generated_seqs_path=./remdm-shortcut-removal/outputs/mdlm_T-${sampling_steps}_topp-${p}.json
+
+
+if [[ "$remove_self_attn" == "true" ]]; then
+    generated_seqs_path=outputs/rm-self-att-mdlm_T-${sampling_steps}_topp-${p}.json
+else
+    generated_seqs_path=outputs/mdlm_T-${sampling_steps}_topp-${p}.json
+fi
+
 
 export HYDRA_FULL_ERROR=1
 
-srun python -u -m main \
+python -u -m main \
     mode=sample_eval \
-    loader.batch_size=1 \
-    loader.eval_batch_size=1 \
+    loader.batch_size=8 \
+    loader.eval_batch_size=8 \
     eval.perplexity_batch_size=1 \
     data=openwebtext-split \
     model=small \
@@ -37,7 +62,9 @@ srun python -u -m main \
     T=${T} \
     sampling.steps=${sampling_steps} \
     seed=1 \
-    sampling.num_sample_batches=5000 \
+    sampling.num_sample_batches=200 \
     sampling.generated_seqs_path=${generated_seqs_path} \
     sampling.nucleus_p=${p} \
-    sampling.sampler="mdlm"
+    sampling.sampler="mdlm" \
+    +model.remove_self_attn=${remove_self_attn} \
+    hydra.job.chdir=false
