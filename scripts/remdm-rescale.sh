@@ -42,4 +42,4 @@ srun python -u -m main \
     sampling.generated_seqs_path=${generated_seqs_path} \
     sampling.nucleus_p=${p} \
     sampling.sampler="remdm-rescale" \
-    sampling.eta=${eta} 
+    sampling.eta=${eta}

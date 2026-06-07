@@ -22,12 +22,18 @@ from tqdm import tqdm
 
 LOG2 = math.log(2)
 
+def _sample_categorical_v2(categorical_probs):
+    categorical_probs = categorical_probs.to(torch.float64)
+    gumbel_norm = (1e-10 - (torch.rand_like(categorical_probs) + 1e-10).log())
+    scores = categorical_probs / gumbel_norm
+    pred = scores.argmax(dim=-1)
+    conf = categorical_probs.gather(-1, pred.unsqueeze(-1)).squeeze(-1)
+    return pred, conf
+
 
 def _sample_categorical(categorical_probs):
   categorical_probs = categorical_probs.to(torch.float64)
-  gumbel_norm = (
-    1e-10
-    - (torch.rand_like(categorical_probs) + 1e-10).log())
+  gumbel_norm = (1e-10 - (torch.rand_like(categorical_probs) + 1e-10).log())
   return (categorical_probs / gumbel_norm).argmax(dim=-1)
 
 
@@ -279,6 +285,26 @@ class Diffusion(L.LightningModule):
     logits[unmasked_indices, xt[unmasked_indices]] = 0
     return logits
 
+  def _shortcut_sub_parameterization(self, logits, xt):
+    # log prob at the mask index = - infinity
+    logits[:, :, self.mask_index] += self.neg_infinity
+    
+    # Normalize the logits such that x.exp() is
+    # a probability distribution over vocab_size.
+    logits = logits - torch.logsumexp(logits, dim=-1,
+                                      keepdim=True)
+
+    # Apply updates directly in the logits matrix.
+    # For the logits of the unmasked tokens, set all values
+    # to -infinity except for the indices corresponding to
+    # the unmasked tokens.
+
+    # unmasked_indices = (xt != self.mask_index)
+    # logits[unmasked_indices] = self.neg_infinity
+    # logits[unmasked_indices, xt[unmasked_indices]] = 0
+    
+    return logits
+
   def _d3pm_parameterization(self, logits):
     if self.subs_masking:
       logits[:, :, self.mask_index] += self.neg_infinity
@@ -312,12 +338,15 @@ class Diffusion(L.LightningModule):
     assert sigma.ndim == 1, sigma.shape
     return sigma
 
-  def forward(self, x, sigma, revise_step=False):
+  def forward(self, x, sigma, revise_step=False, mask_embedding_blending=False):
     """Returns log score."""
     sigma = self._process_sigma(sigma)
     with torch.cuda.amp.autocast(dtype=torch.float32):
-      logits = self.backbone(x, sigma, revise_step=revise_step)
-    
+      logits = self.backbone(x, sigma, mask_embedding_blending=mask_embedding_blending)
+
+    if revise_step or mask_embedding_blending:
+      return self._shortcut_sub_parameterization(logits=logits, xt=x)
+
     if self.parameterization == 'subs':
       return self._subs_parameterization(logits=logits,
                                          xt=x)
@@ -327,6 +356,7 @@ class Diffusion(L.LightningModule):
                                          sigma=sigma)
     elif self.parameterization == 'd3pm':
       return self._d3pm_parameterization(logits=logits)
+
     return logits
 
   def _d3pm_loss(self, model_output, xt, x0, t):
@@ -656,115 +686,11 @@ class Diffusion(L.LightningModule):
     return p_x0_cache, xs, timestep - dt
 
 
-  def _ddpm_caching_update_3(self, x, t, dt, p_x0=None, conf=None):
-    assert self.config.noise.type == 'loglinear'
-    sigma_t, _ = self.noise(t)
-    if t.ndim > 1:
-        t = t.squeeze(-1)
-    assert t.ndim == 1
-    move_chance_t = t[:, None, None]
-    move_chance_s = (t - dt)[:, None, None]
-    assert move_chance_t.ndim == 3, move_chance_t.shape
-    # --------------------------------------------------
-    # normal prediction (for unmasking)
-    # --------------------------------------------------
-    if p_x0 is None:
-        p_x0 = self.forward(x, sigma_t).exp()
-        if self.config.sampling.nucleus_p < 1:
-            sorted_probs, sorted_indices = torch.sort(p_x0, descending=True, dim=-1)
-            cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
-            top_p_mask = cumulative_probs <= self.config.sampling.nucleus_p
-            top_p_mask[..., 0] = True
-            nucleus_probs = sorted_probs * top_p_mask
-            nucleus_probs /= nucleus_probs.sum(dim=-1, keepdim=True)
-            p_x0 = torch.zeros_like(p_x0).scatter_(-1, sorted_indices, nucleus_probs)
-    # --------------------------------------------------
-    # revise prediction (for remasking)
-    # --------------------------------------------------
-    p_x0_revise = self.forward(x, sigma_t, revise_step=True).exp()
-
-    # model preferred token
-    pred_tokens = p_x0_revise.argmax(dim=-1)
-    print("(pred_tokens != x).sum()", (pred_tokens != x).sum().item())
-    print("(pred_tokens == self.mask_index).sum()", (x == self.mask_index).sum().item())
-    changed_mask = ((x != self.mask_index) & (pred_tokens != x))
-    num_changed = changed_mask.sum().item()
-    print(f"model changed opinion on {num_changed} tokens")
-
-
-    assert move_chance_t.ndim == p_x0.ndim
-    alpha_t = (1 - move_chance_t)[0].item()
-    alpha_s = (1 - move_chance_s)[0].item()
-    if alpha_t > 0:
-        sigma_max = min(1, (1 - alpha_s) / alpha_t)
-    else:
-        sigma_max = 1
-    # ==================================================
-    # UNMASK POLICY (external confidence)
-    # ==================================================
-    eta_unmask = conf.softmax(dim=-1)
-    masked_flag = (x == self.mask_index)
-    eta_unmask[masked_flag] = 0
-    sigma_unmask = eta_unmask * sigma_max
-    # ==================================================
-    # REMASK POLICY (model uncertainty)
-    # ==================================================
-    
-    # logp = torch.log(p_x0_revise + 1e-12)
-    # top1 = logp.max(dim=-1).values
-    # top2 = logp.topk(2, dim=-1).values[..., 1]
-    # gap = top1 - top2  # confidence margin
-    # eta_remask = torch.exp(-gap)   # small gap => uncertain => remask
-    # print("gap:", gap.mean().item(), gap.max().item()) # gap: 15.0625 27.625
-    # print("eta_remask 1:", eta_remask.mean().item(), eta_remask.max().item()) # eta_remask: 0.296875 1.0
-    
-    # entropy = -(p_x0_revise * torch.log(p_x0_revise + 1e-12)).sum(dim=-1)
-    # eta_remask = entropy / math.log(p_x0_revise.shape[-1])
-
-    model_conf = p_x0_revise.max(dim=-1).values
-    eta_remask = 1.0 - model_conf
-    # eta_remask = eta_unmask
-    visible_flag = (x != self.mask_index)
-    eta_remask[~visible_flag] = 0
-    sigma_remask = eta_remask * sigma_max
-    # print("eta_remask.shape", eta_remask.shape) # torch.Size([8, 1024])
-    # print("eta_remask 2:", eta_remask.mean().item(), eta_remask.max().item()) # eta_remask: 0.296875 1.0
-    
-    # ==================================================
-    # visible tokens -> may remask
-    # ==================================================
-    q_visible = p_x0 * (1 - sigma_remask[:, :, None])
-    q_visible[..., self.mask_index] = sigma_remask
-    # ==================================================
-    # masked tokens -> may unmask
-    # ==================================================
-    q_masked = p_x0 * ((alpha_s - (1 - sigma_unmask[:, :, None]) * alpha_t) / (1 - alpha_t))
-    q_masked[..., self.mask_index] = (1 - alpha_s - sigma_unmask * alpha_t) / (1 - alpha_t)
-    copy_flag = (x != self.mask_index)
-    q_xs = torch.where(copy_flag.unsqueeze(-1), q_visible, q_masked)
-    xs = _sample_categorical(q_xs)
-    # ==================================================
-    # update confidence
-    # ==================================================
-    unmask_mask = ((x == self.mask_index)& (xs != self.mask_index))
-    batch_indices = torch.arange(xs.shape[0],device=xs.device)[:, None]
-    feature_indices = torch.arange(xs.shape[1], device=xs.device)
-    conf_values = -p_x0[batch_indices, feature_indices, xs]
-    conf[unmask_mask] = conf_values[unmask_mask]
-    remask_mask = ((x != self.mask_index) & (xs == self.mask_index))
-    conf[remask_mask] = -torch.inf
-    # cache optimization
-    if torch.allclose(xs, x) and not self.time_conditioning:
-        p_x0_cache = p_x0
-    else:
-        p_x0_cache = None
-
-    return p_x0_cache, xs, conf
 
 
 
 
-  def _ddpm_caching_update_2(self, x, t, dt, p_x0=None, conf=None):
+  def _ddpm_caching_update(self, x, t, dt, p_x0=None, conf=None, revise_step=False, mask_embedding_blending=False, step=0):
     assert self.config.noise.type == 'loglinear'
     sigma_t, _ = self.noise(t)
     if t.ndim > 1:
@@ -773,71 +699,8 @@ class Diffusion(L.LightningModule):
     move_chance_t = t[:, None, None]
     move_chance_s = (t - dt)[:, None, None]
     assert move_chance_t.ndim == 3, move_chance_t.shape
-    if p_x0 is None:
-      p_x0 = self.forward(x, sigma_t).exp()
-      # print("x.shape", x.shape) # torch.Size([8, 1024])
-      # print("p_x0.shape", p_x0.shape) # torch.Size([8, 1024, 50258])
-      # print("self.config.sampling.nucleus_p", self.config.sampling.nucleus_p) # 0.9
-      if self.config.sampling.nucleus_p < 1:
-        sorted_probs, sorted_indices = torch.sort(p_x0, descending=True, dim=-1)
-        cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
-        top_p_mask = cumulative_probs <= self.config.sampling.nucleus_p
-        top_p_mask[..., 0] = True
-        nucleus_probs = sorted_probs * top_p_mask
-        nucleus_probs /= nucleus_probs.sum(dim=-1, keepdim=True)
-        p_x0 = torch.zeros_like(p_x0).scatter_(-1, sorted_indices, nucleus_probs)
     
-    assert move_chance_t.ndim == p_x0.ndim
-
-    alpha_t = (1 - move_chance_t)[0].item()
-    alpha_s = (1 - move_chance_s)[0].item()
-    if alpha_t > 0:
-      sigma_max = min(1, (1 - alpha_s) / alpha_t)
-    else:
-      sigma_max = 1
-    eta = conf.softmax(dim=-1)
-    masked_flag = (x == self.mask_index).to(torch.bool)
-    eta[masked_flag] = 0
-    sigma = eta * sigma_max
-    q_xs = p_x0 * (1 - sigma[:, :, None])
-    q_xs[..., self.mask_index] = sigma
-    q_xs_2 = p_x0 * ((alpha_s - (1 - sigma[:, :, None]) * alpha_t) / (1 - alpha_t))
-    q_xs_2[..., self.mask_index] = (1 - alpha_s - sigma * alpha_t) / (1 - alpha_t)
-    copy_flag = (x != self.mask_index).to(torch.bool)
-    q_xs = torch.where(copy_flag.unsqueeze(-1), q_xs, q_xs_2)
-    xs = _sample_categorical(q_xs)
-    # update conf
-    unmask_mask = (x == self.mask_index) & (xs != self.mask_index)
-    batch_indices = torch.arange(xs.shape[0])[:, None]
-    feature_indices = torch.arange(xs.shape[1])
-    conf_values = - p_x0[batch_indices, feature_indices, xs]
-    conf[unmask_mask] = conf_values[unmask_mask]
-    remask_mask = (x != self.mask_index) & (xs == self.mask_index)
-    conf[remask_mask] = -torch.inf
-  
-    if torch.allclose(xs, x) and not self.time_conditioning:
-      p_x0_cache = p_x0
-    else:
-      p_x0_cache = None
-
-    return p_x0_cache, xs, conf
-
-
-
-
-
-
-
-  def _ddpm_caching_update(self, x, t, dt, p_x0=None, conf=None):
-    assert self.config.noise.type == 'loglinear'
-    sigma_t, _ = self.noise(t)
-    if t.ndim > 1:
-      t = t.squeeze(-1)
-    assert t.ndim == 1
-    move_chance_t = t[:, None, None]
-    move_chance_s = (t - dt)[:, None, None]
-    assert move_chance_t.ndim == 3, move_chance_t.shape
-    if p_x0 is None:
+    if (p_x0 is None) or (self.config.sampling.sampler == 'remasking-via-shortcut-removal'):
       p_x0 = self.forward(x, sigma_t).exp()
       # print("x.shape", x.shape) # torch.Size([8, 1024])
       # print("p_x0.shape", p_x0.shape) # torch.Size([8, 1024, 50258])
@@ -955,13 +818,327 @@ class Diffusion(L.LightningModule):
         copy_flag = (x != self.mask_index).to(torch.bool)
         q_xs = torch.where(copy_flag.unsqueeze(-1), q_xs, q_xs_2)
         xs = _sample_categorical(q_xs)
+    elif self.config.sampling.sampler == 'remasking-via-shortcut-removal':
+        pred, conf = _sample_categorical_v2(p_x0)
+        xs = x.clone()
+        B, L = x.shape
+        mask_flag = (x == self.mask_index)
+        for b in range(B):
+            idx = torch.where(mask_flag[b])[0]
+            if len(idx) == 0:
+                continue
+            if (step > 300) and revise_step:
+              k = min(2, len(idx))
+            else:
+              k = min(1, len(idx))
+            conf = torch.rand(conf.shape).cuda()
+            scores = conf[b, idx]
+            chosen = idx[torch.topk(scores, k=k).indices]
+            xs[b, chosen] = pred[b, chosen]
 
+        if (step > 300) and revise_step:
+            p_x0_2 = self.forward(xs, sigma_t, revise_step=revise_step, mask_embedding_blending=mask_embedding_blending).exp()
+            pred_tokens = p_x0_2.argmax(dim=-1)
+            _, conf = _sample_categorical_v2(p_x0_2)
+
+            for b in range(B):
+                mask_idx = (xs[b] != self.mask_index) & (pred_tokens[b] != xs[b])
+                if mask_idx.sum() == 0:
+                    mask_idx = (xs[b] != self.mask_index)
+                visible_idx = torch.where(mask_idx)[0]
+                if len(visible_idx) == 0:
+                    continue
+                newly_added = torch.isin(visible_idx, chosen if len(visible_idx) > 0 else visible_idx)
+                valid_idx = visible_idx[~newly_added] if newly_added.any() else visible_idx
+                if len(valid_idx) == 0:
+                    continue
+                scores = conf[b, valid_idx]
+                remask_pos = valid_idx[torch.topk(scores, k=1, largest=False).indices]
+                # remask_pos = valid_idx[torch.argmin(scores)]
+                xs[b, remask_pos] = self.mask_index
+              
     if torch.allclose(xs, x) and not self.time_conditioning:
       p_x0_cache = p_x0
     else:
       p_x0_cache = None
 
     return p_x0_cache, xs, conf
+
+  def _ddpm_caching_update_3(self, x, t, dt, p_x0=None, conf=None):
+    assert self.config.noise.type == 'loglinear'
+    sigma_t, _ = self.noise(t)
+    if t.ndim > 1:
+        t = t.squeeze(-1)
+    assert t.ndim == 1
+    move_chance_t = t[:, None, None]
+    move_chance_s = (t - dt)[:, None, None]
+    assert move_chance_t.ndim == 3, move_chance_t.shape
+    # --------------------------------------------------
+    # normal prediction (for unmasking)
+    # --------------------------------------------------
+    if p_x0 is None:
+        p_x0 = self.forward(x, sigma_t).exp()
+        if self.config.sampling.nucleus_p < 1:
+            sorted_probs, sorted_indices = torch.sort(p_x0, descending=True, dim=-1)
+            cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+            top_p_mask = cumulative_probs <= self.config.sampling.nucleus_p
+            top_p_mask[..., 0] = True
+            nucleus_probs = sorted_probs * top_p_mask
+            nucleus_probs /= nucleus_probs.sum(dim=-1, keepdim=True)
+            p_x0 = torch.zeros_like(p_x0).scatter_(-1, sorted_indices, nucleus_probs)
+    # --------------------------------------------------
+    # revise prediction (for remasking)
+    # --------------------------------------------------
+    p_x0_revise = self.forward(x.clone(), sigma_t, revise_step=True).exp()
+    
+    # model preferred token
+    pred_tokens = p_x0_revise.argmax(dim=-1)
+    print("\n(pred_tokens != x).sum()", (pred_tokens != x).sum().item())
+    print("(pred_tokens == self.mask_index).sum()", (x == self.mask_index).sum().item())
+    changed_mask = ((x != self.mask_index) & (pred_tokens != x))
+    num_changed = changed_mask.sum().item()
+    print(f"model changed opinion on {num_changed} tokens\n")
+    decoded_x = self.tokenizer.batch_decode(x, skip_special_tokens=False)
+    decoded_pred = self.tokenizer.batch_decode(pred_tokens, skip_special_tokens=False)
+    for i in range(x.shape[0]):
+        print(f"\n=====Sample {i}=====")
+        print(decoded_x[i][:100])
+        print("----------" * 5, )
+        print(decoded_pred[i][:100])
+
+    print("\n\n")
+
+    assert move_chance_t.ndim == p_x0.ndim
+    alpha_t = (1 - move_chance_t)[0].item()
+    alpha_s = (1 - move_chance_s)[0].item()
+    if alpha_t > 0:
+        sigma_max = min(1, (1 - alpha_s) / alpha_t)
+    else:
+        sigma_max = 1
+    # ==================================================
+    # UNMASK POLICY (external confidence)
+    # ==================================================
+    eta_unmask = conf.softmax(dim=-1)
+    masked_flag = (x == self.mask_index)
+    eta_unmask[masked_flag] = 0
+    sigma_unmask = eta_unmask * sigma_max
+    # ==================================================
+    # REMASK POLICY (model uncertainty)
+    # ==================================================
+    
+    # logp = torch.log(p_x0_revise + 1e-12)
+    # top1 = logp.max(dim=-1).values
+    # top2 = logp.topk(2, dim=-1).values[..., 1]
+    # gap = top1 - top2  # confidence margin
+    # eta_remask = torch.exp(-gap)   # small gap => uncertain => remask
+    # print("gap:", gap.mean().item(), gap.max().item()) # gap: 15.0625 27.625
+    # print("eta_remask 1:", eta_remask.mean().item(), eta_remask.max().item()) # eta_remask: 0.296875 1.0
+    
+    # entropy = -(p_x0_revise * torch.log(p_x0_revise + 1e-12)).sum(dim=-1)
+    # eta_remask = entropy / math.log(p_x0_revise.shape[-1])
+
+    model_conf = p_x0_revise.max(dim=-1).values
+    eta_remask = 1.0 - model_conf
+    # eta_remask = eta_unmask
+    visible_flag = (x != self.mask_index)
+    eta_remask[~visible_flag] = 0
+    sigma_remask = eta_remask * sigma_max
+    # print("eta_remask.shape", eta_remask.shape) # torch.Size([8, 1024])
+    # print("eta_remask 2:", eta_remask.mean().item(), eta_remask.max().item()) # eta_remask: 0.296875 1.0
+    
+    # ==================================================
+    # visible tokens -> may remask
+    # ==================================================
+    q_visible = p_x0 * (1 - sigma_remask[:, :, None])
+    q_visible[..., self.mask_index] = sigma_remask
+    # ==================================================
+    # masked tokens -> may unmask
+    # ==================================================
+    q_masked = p_x0 * ((alpha_s - (1 - sigma_unmask[:, :, None]) * alpha_t) / (1 - alpha_t))
+    q_masked[..., self.mask_index] = (1 - alpha_s - sigma_unmask * alpha_t) / (1 - alpha_t)
+    copy_flag = (x != self.mask_index)
+    q_xs = torch.where(copy_flag.unsqueeze(-1), q_visible, q_masked)
+    xs = _sample_categorical(q_xs)
+    # ==================================================
+    # update confidence
+    # ==================================================
+    unmask_mask = ((x == self.mask_index)& (xs != self.mask_index))
+    batch_indices = torch.arange(xs.shape[0],device=xs.device)[:, None]
+    feature_indices = torch.arange(xs.shape[1], device=xs.device)
+    conf_values = -p_x0[batch_indices, feature_indices, xs]
+    conf[unmask_mask] = conf_values[unmask_mask]
+    remask_mask = ((x != self.mask_index) & (xs == self.mask_index))
+    conf[remask_mask] = -torch.inf
+    # cache optimization
+    if torch.allclose(xs, x) and not self.time_conditioning:
+        p_x0_cache = p_x0
+    else:
+        p_x0_cache = None
+
+    return p_x0_cache, xs, conf
+
+  def _ddpm_caching_update_2(self, x, t, dt, p_x0=None, conf=None, revise_step=False):
+    assert self.config.noise.type == 'loglinear'
+    sigma_t, _ = self.noise(t)
+    if t.ndim > 1:
+      t = t.squeeze(-1)
+    assert t.ndim == 1
+    move_chance_t = t[:, None, None]
+    move_chance_s = (t - dt)[:, None, None]
+    assert move_chance_t.ndim == 3, move_chance_t.shape
+    if p_x0 is None:
+      p_x0 = self.forward(x, sigma_t, revise_step=revise_step).exp()
+      # print("x.shape", x.shape) # torch.Size([8, 1024])
+      # print("p_x0.shape", p_x0.shape) # torch.Size([8, 1024, 50258])
+      # print("self.config.sampling.nucleus_p", self.config.sampling.nucleus_p) # 0.9
+      if self.config.sampling.nucleus_p < 1:
+        sorted_probs, sorted_indices = torch.sort(p_x0, descending=True, dim=-1)
+        cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+        top_p_mask = cumulative_probs <= self.config.sampling.nucleus_p
+        top_p_mask[..., 0] = True
+        nucleus_probs = sorted_probs * top_p_mask
+        nucleus_probs /= nucleus_probs.sum(dim=-1, keepdim=True)
+        p_x0 = torch.zeros_like(p_x0).scatter_(-1, sorted_indices, nucleus_probs)
+        # print("p_x0.shape", p_x0.shape) # torch.Size([8, 1024, 50258])
+        # print("nucleus_probs.shape", nucleus_probs.shape) # torch.Size([8, 1024, 50258])
+    
+    # --------------------------------------------------
+    # revise prediction (for remasking)
+    # --------------------------------------------------
+    '''
+    print("\n/////////////////////////////////////////")
+    p_x0_revise = self.forward(x.clone(), sigma_t, revise_step=True).exp()
+    pred_tokens = p_x0_revise.argmax(dim=-1)
+    print("\n(pred_tokens != x).sum()", (pred_tokens != x).sum().item())
+    print("(pred_tokens == self.mask_index).sum()", (x == self.mask_index).sum().item())
+    changed_mask = ((x != self.mask_index) & (pred_tokens != x))
+    num_changed = changed_mask.sum().item()
+    print(f"model changed opinion on {num_changed} tokens\n")
+    decoded_x = self.tokenizer.batch_decode(x, skip_special_tokens=False)
+    decoded_pred = self.tokenizer.batch_decode(pred_tokens, skip_special_tokens=False)
+    for i in range(x.shape[0]):
+        print(f"\n=====Sample {i}=====")
+        print(decoded_x[i][:500])
+        print("----------" * 5, )
+        print(decoded_pred[i][:500])
+
+    print("\n\n")
+    
+    p_x0_revise = self.forward(x.clone(), sigma_t, revise_step=False).exp()
+    pred_tokens = p_x0_revise.argmax(dim=-1)
+    print("\n(pred_tokens != x).sum()", (pred_tokens != x).sum().item())
+    print("(pred_tokens == self.mask_index).sum()", (x == self.mask_index).sum().item())
+    changed_mask = ((x != self.mask_index) & (pred_tokens != x))
+    num_changed = changed_mask.sum().item()
+    print(f"model changed opinion on {num_changed} tokens\n")
+    decoded_x = self.tokenizer.batch_decode(x, skip_special_tokens=False)
+    decoded_pred = self.tokenizer.batch_decode(pred_tokens, skip_special_tokens=False)
+    for i in range(x.shape[0]):
+        print(f"\n=====Sample {i}=====")
+        print(decoded_x[i][:500])
+        print("----------" * 5, )
+        print(decoded_pred[i][:500])
+    print("\n/////////////////////////////////////////")
+    print("\n\n")
+    '''
+
+    assert move_chance_t.ndim == p_x0.ndim
+    alpha_t = (1 - move_chance_t)[0].item()
+    alpha_s = (1 - move_chance_s)[0].item()
+    if alpha_t > 0:
+      sigma_max = min(1, (1 - alpha_s) / alpha_t)
+    else:
+      sigma_max = 1
+    # print("conf.shape", conf.shape) # torch.Size([8, 1024])
+    eta = conf.softmax(dim=-1)
+    # print("eta.shape", eta.shape) # torch.Size([8, 1024])
+    masked_flag = (x == self.mask_index).to(torch.bool)
+    eta[masked_flag] = 0
+    sigma = eta * sigma_max
+    # print("sigma.shape:", sigma.shape) # torch.Size([8, 1024])
+    # print("p_x0.shape:", p_x0.shape) # torch.Size([8, 1024, 50258])
+    # print("sigma_max", sigma_max) # 1
+    q_xs = p_x0 * (1 - sigma[:, :, None])
+    q_xs[..., self.mask_index] = sigma
+    q_xs_2 = p_x0 * ((alpha_s - (1 - sigma[:, :, None]) * alpha_t) / (1 - alpha_t))
+    q_xs_2[..., self.mask_index] = (1 - alpha_s - sigma * alpha_t) / (1 - alpha_t)
+    copy_flag = (x != self.mask_index).to(torch.bool)
+    q_xs = torch.where(copy_flag.unsqueeze(-1), q_xs, q_xs_2)
+    xs = _sample_categorical(q_xs)
+    # print("xs.shape", xs.shape) # torch.Size([8, 1024])
+    # update conf
+    unmask_mask = (x == self.mask_index) & (xs != self.mask_index)
+    batch_indices = torch.arange(xs.shape[0])[:, None]
+    feature_indices = torch.arange(xs.shape[1])
+    conf_values = - p_x0[batch_indices, feature_indices, xs]
+    conf[unmask_mask] = conf_values[unmask_mask]
+    remask_mask = (x != self.mask_index) & (xs == self.mask_index)
+    conf[remask_mask] = -torch.inf
+  
+    if torch.allclose(xs, x) and not self.time_conditioning:
+      p_x0_cache = p_x0
+    else:
+      p_x0_cache = None
+
+    return p_x0_cache, xs, conf
+
+  def _confidence_unmask_revise(self,x, t, dt, p_x0=None, conf=None, revise_step=False, step=0):
+      sigma_t, _ = self.noise(t)
+      p_x0 = self.forward(x, sigma_t, revise_step=False).exp()
+      if self.config.sampling.nucleus_p < 1:
+          sorted_probs, sorted_indices = torch.sort(p_x0, descending=True, dim=-1)
+          cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+          top_p_mask = cumulative_probs <= self.config.sampling.nucleus_p
+          top_p_mask[..., 0] = True
+          sorted_probs = sorted_probs * top_p_mask
+          sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True)
+          p_x0 = torch.zeros_like(p_x0).scatter_(-1, sorted_indices, sorted_probs)
+      
+      pred, conf = _sample_categorical_v2(p_x0)
+      xs = x.clone()
+      B, L = x.shape
+      mask_flag = (x == self.mask_index)
+
+      for b in range(B):
+          idx = torch.where(mask_flag[b])[0]
+          if len(idx) == 0:
+              continue
+          if step > 300:
+            k = min(2, len(idx))
+          else:
+            k = min(1, len(idx))
+          conf = torch.rand(conf.shape).cuda()
+          scores = conf[b, idx]
+          chosen = idx[torch.topk(scores, k=k).indices]
+          xs[b, chosen] = pred[b, chosen]
+
+      if step > 300:
+          p_x0_2 = self.forward(xs, sigma_t, revise_step=True).exp()
+          pred_tokens = p_x0_2.argmax(dim=-1)
+          _, conf = _sample_categorical_v2(p_x0_2)
+
+          for b in range(B):
+              mask_idx = (xs[b] != self.mask_index) & (pred_tokens[b] != xs[b])
+              if mask_idx.sum() == 0:
+                  mask_idx = (xs[b] != self.mask_index)
+              visible_idx = torch.where(mask_idx)[0]
+              if len(visible_idx) == 0:
+                  continue
+              newly_added = torch.isin(visible_idx, chosen if len(visible_idx) > 0 else visible_idx)
+              valid_idx = visible_idx[~newly_added] if newly_added.any() else visible_idx
+              if len(valid_idx) == 0:
+                  continue
+              scores = conf[b, valid_idx]
+              remask_pos = valid_idx[torch.topk(scores, k=1, largest=False).indices]
+              # remask_pos = valid_idx[torch.argmin(scores)]
+              xs[b, remask_pos] = self.mask_index
+          
+      if torch.allclose(xs, x) and not self.time_conditioning:
+          p_x0_cache = p_x0
+      else:
+          p_x0_cache = None
+      return p_x0_cache, xs, conf
+      
 
   def _ddpm_update(self, x, t, dt):
     sigma_t, _ = self.noise(t)
@@ -1023,6 +1200,11 @@ class Diffusion(L.LightningModule):
   def _sample(self, num_steps=None, eps=1e-5):
     """Generate samples from the model."""
     batch_size_per_gpu = self.config.loader.eval_batch_size
+    mask_embedding_blending = getattr(self.config.sampling, "mask_embedding_blending", False)
+    revise_step = getattr(self.config.sampling, "revise_step", False)
+    # print("revise_step:", revise_step)
+    # print("mask_embedding_blending:", mask_embedding_blending)
+
     if self.parameterization == 'ar':
       return self._ar_sampler(batch_size_per_gpu)
     # Lightning auto-casting is not working in this method for some reason
@@ -1056,12 +1238,12 @@ class Diffusion(L.LightningModule):
         if self.sampler == 'ddpm':
           x = self._ddpm_update(x, t, dt)
         elif self.sampler == 'ddpm_cache':
-
           x_prev = x.clone()
-
-          p_x0_cache, x_next, confident_score = self._ddpm_caching_update(x, t, dt, p_x0=p_x0_cache, conf=confident_score)
+          
+          # p_x0_cache, x_next, confident_score = self._confidence_unmask_revise(x, t, dt, p_x0=p_x0_cache, conf=confident_score, revise_step=True, step=i)
+          p_x0_cache, x_next, confident_score = self._ddpm_caching_update(x, t, dt, p_x0=p_x0_cache, conf=confident_score, revise_step=revise_step, mask_embedding_blending=mask_embedding_blending, step=i)
           x = x_next
-
+          '''
           mask_to_word = (
               (x_prev == self.mask_index) &
               (x != self.mask_index)
@@ -1080,15 +1262,13 @@ class Diffusion(L.LightningModule):
           total_mask_to_word += mask_to_word
           total_word_to_mask += word_to_mask
 
-          # print(
-          #     f"step={i:03d} | "
-          #     f"mask→word={mask_to_word} | "
-          #     f"word→mask={word_to_mask} | "
-          #     f"word→word={word_to_word}"
-          # )
-          
-          # p_x0_cache, x_next, confident_score = self._ddpm_caching_update(x, t, dt, p_x0=p_x0_cache, conf=confident_score)
-          # x = x_next
+          print(
+              f"step={i:03d} | "
+              f"mask→word={mask_to_word} | "
+              f"word→mask={word_to_mask} | "
+              f"word→word={word_to_word}"
+          )
+          '''
         else:
           x = self._analytic_update(x, t, dt)
 

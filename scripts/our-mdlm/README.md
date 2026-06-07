@@ -1,0 +1,98 @@
+
+
+# Our-MDLM
+
+
+```bash
+runai submit \
+  --name our-mdlm \
+  --image registry.rcp.epfl.ch/dllm-sampling/my-toolbox:v0.3 \
+  --gpu 1 \
+  --backoff-limit 0 \
+  --existing-pvc claimname=course-ee-628-scratch,path=/scratch \
+  --existing-pvc claimname=home,path=/home/mnafez \
+  --command -- bash -c "
+    source /scratch/mnafez/miniconda3/etc/profile.d/conda.sh && \
+    conda activate remdm && \
+    cd /scratch/mnafez/remdm-shortcut-removal && \
+    bash scripts/our-mdlm/mdlm.sh --revise_step false --remove_self_attn false --mask_embedding_blending false
+    "
+```
+
+
+
+# Our-MDLM + Conf-Remasking
+
+```bash
+runai submit \
+  --name our-mdlm-conf-remasking \
+  --image registry.rcp.epfl.ch/dllm-sampling/my-toolbox:v0.3 \
+  --gpu 1 \
+  --backoff-limit 0 \
+  --existing-pvc claimname=course-ee-628-scratch,path=/scratch \
+  --existing-pvc claimname=home,path=/home/mnafez \
+  --command -- bash -c "
+    source /scratch/mnafez/miniconda3/etc/profile.d/conda.sh && \
+    conda activate remdm && \
+    cd /scratch/mnafez/remdm-shortcut-removal && \
+    bash scripts/our-mdlm/mdlm.sh --revise_step true --remove_self_attn false --mask_embedding_blending false
+    "
+```
+
+
+#  Our-MDLM + Conf-Remasking + Self-Att-Removal
+
+```bash
+runai submit \
+  --name our-mdlm-conf-remasking-self-att-removal \
+  --image registry.rcp.epfl.ch/dllm-sampling/my-toolbox:v0.3 \
+  --gpu 1 \
+  --backoff-limit 0 \
+  --existing-pvc claimname=course-ee-628-scratch,path=/scratch \
+  --existing-pvc claimname=home,path=/home/mnafez \
+  --command -- bash -c "
+    source /scratch/mnafez/miniconda3/etc/profile.d/conda.sh && \
+    conda activate remdm && \
+    cd /scratch/mnafez/remdm-shortcut-removal && \
+    bash scripts/our-mdlm/mdlm.sh --revise_step true --remove_self_attn true --mask_embedding_blending false
+    "
+```
+
+
+# Our-MDLM + Conf-Remasking + Mask-Emb-Blending
+
+```bash
+runai submit \
+  --name our-mdlm-conf-remasking-mask-emb-blending \
+  --image registry.rcp.epfl.ch/dllm-sampling/my-toolbox:v0.3 \
+  --gpu 1 \
+  --backoff-limit 0 \
+  --existing-pvc claimname=course-ee-628-scratch,path=/scratch \
+  --existing-pvc claimname=home,path=/home/mnafez \
+  --command -- bash -c "
+    source /scratch/mnafez/miniconda3/etc/profile.d/conda.sh && \
+    conda activate remdm && \
+    cd /scratch/mnafez/remdm-shortcut-removal && \
+    bash scripts/our-mdlm/mdlm.sh --revise_step true --remove_self_attn false --mask_embedding_blending true
+    "
+```
+
+
+# Our-MDLM + Conf-Remasking + Mask-Emb-Blending + Self-Att-Removal
+
+```bash
+runai submit \
+  --name our-mdlm-conf-remasking-full-shortcut-rm \
+  --image registry.rcp.epfl.ch/dllm-sampling/my-toolbox:v0.3 \
+  --gpu 1 \
+  --backoff-limit 0 \
+  --existing-pvc claimname=course-ee-628-scratch,path=/scratch \
+  --existing-pvc claimname=home,path=/home/mnafez \
+  --command -- bash -c "
+    source /scratch/mnafez/miniconda3/etc/profile.d/conda.sh && \
+    conda activate remdm && \
+    cd /scratch/mnafez/remdm-shortcut-removal && \
+    bash scripts/our-mdlm/mdlm.sh --revise_step true --remove_self_attn true --mask_embedding_blending true
+    "
+```
+

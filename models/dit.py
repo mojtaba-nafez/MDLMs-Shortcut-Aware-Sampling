@@ -479,17 +479,16 @@ class DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     else:
       return  bias_dropout_add_scale_fused_inference
 
-  def forward(self, indices, sigma, revise_step=False):
+  def forward(self, indices, sigma, mask_embedding_blending=False):
     # print("indices:", indices)
     x = self.vocab_embed(indices)
-
     mask_id = 50257
-    mask_weight = 0.8
-    if revise_step:
+    mask_weight = 0.4
+    if mask_embedding_blending:
         not_already_masked = (indices != mask_id).unsqueeze(-1)
         mask_token_emb = self.vocab_embed([mask_id])
         mixed_x = ((1 - mask_weight) * x) + (mask_weight * mask_token_emb.view(1, 1, -1))
-        x = torch.where(not_already_masked, mixed_x, x)
+        x = mixed_x
 
     c = F.silu(self.sigma_map(sigma))
 

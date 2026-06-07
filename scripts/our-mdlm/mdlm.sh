@@ -12,7 +12,8 @@ export NCCL_DEBUG=warn
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
 remove_self_attn=false
-sampling_steps=1024
+mask_embedding_blending=false
+revise_step=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -20,8 +21,12 @@ while [[ $# -gt 0 ]]; do
             remove_self_attn="$2"
             shift 2
             ;;
-        --sampling_steps)
-            sampling_steps="$2"
+        --mask_embedding_blending)
+            mask_embedding_blending="$2"
+            shift 2
+            ;;
+        --revise_step)
+            revise_step="$2"
             shift 2
             ;;
         *)
@@ -34,18 +39,10 @@ done
 checkpoint_path=weights/mdlm.ckpt
 
 T=0
+sampling_steps=1024
 p=0.9
-eta=0.02
-t_on=0.55
-t_off=0.05
-alpha_on=0.9
+generated_seqs_path=outputs/our-mdlm_revise_step_${revise_step}_remove_self_attn_${remove_self_attn}_mask_embedding_blending_${mask_embedding_blending}_T-${sampling_steps}_topp-${p}.json
 
-
-if [[ "$remove_self_attn" == "true" ]]; then
-    generated_seqs_path=outputs/rm-self-att-remdm-loop_T-${sampling_steps}_eta-${eta}_ton-${t_on}_toff-${t_off}_alphaon-${alpha_on}_topp-${p}.json
-else
-    generated_seqs_path=outputs/remdm-loop_T-${sampling_steps}_eta-${eta}_ton-${t_on}_toff-${t_off}_alphaon-${alpha_on}_topp-${p}.json
-fi
 
 export HYDRA_FULL_ERROR=1
 
@@ -59,22 +56,18 @@ python -u -m main \
     parameterization=subs \
     backbone=dit \
     model.length=1024 \
-    eval.checkpoint_path="${checkpoint_path}" \
+    eval.checkpoint_path=${checkpoint_path} \
     time_conditioning=false \
     +wandb.offline=true \
-    hydra.run.dir="${PWD}/outputs/remdm-loop" \
+    hydra.run.dir="${PWD}/outputs/our-mdlm" \
     T=${T} \
     sampling.steps=${sampling_steps} \
     seed=1 \
     sampling.num_sample_batches=200 \
-    sampling.generated_seqs_path="${generated_seqs_path}" \
+    sampling.generated_seqs_path=${generated_seqs_path} \
     sampling.nucleus_p=${p} \
-    sampling.sampler=remdm-loop \
-    sampling.eta=${eta} \
-    sampling.t_on=${t_on} \
-    sampling.t_off=${t_off} \
-    sampling.alpha_on=${alpha_on} \
+    sampling.sampler="remasking-via-shortcut-removal" \
     hydra.job.chdir=false \
     +model.remove_self_attn=${remove_self_attn} \
-    +sampling.revise_step=false \
-    +sampling.mask_embedding_blending=false
+    +sampling.revise_step=${revise_step} \
+    +sampling.mask_embedding_blending=${mask_embedding_blending}

@@ -219,7 +219,7 @@ def main(config):
     assert len(samples) == len(human_references)
     results = mauve.compute_mauve(p_text=human_references, q_text=samples, device_id=0, max_text_length=1024, verbose=False)
     mauve_score = results.mauve
-
+    # mauve_score = 0.0
     result_dict = {'gen_ppl': gen_ppl, 'entropy': sum(entropies) / len(entropies), 'MAUVE': mauve_score, 'entropies': entropies, 'text_samples': samples}
     with open(config.sampling.generated_seqs_path, "w") as file:
         json.dump(result_dict, file, indent=4)

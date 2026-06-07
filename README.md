@@ -31,101 +31,7 @@ scp -r /home/mnafez/Downloads/MDM-Checkpoints/mdlm.ckpt jumphost.rcp.epfl.ch:/ho
 
 # Submit Job (None-Intractive)
 
-```bash
-runai submit \
-  --name gidd-remdm-loop-original \
-  --image registry.rcp.epfl.ch/dllm-sampling/my-toolbox:v0.3 \
-  --gpu 1 \
-  --existing-pvc claimname=course-ee-628-scratch,path=/scratch \
-  --existing-pvc claimname=home,path=/home/mnafez \
-  --command -- bash -c "
-    source /scratch/mnafez/miniconda3/etc/profile.d/conda.sh && \
-    conda activate remdm && \
-    cd /scratch/mnafez/remdm-shortcut-removal && \
-    bash scripts/remdm-loop.sh --remove_self_attn false
-    "
-```
-
-```bash
-runai submit \
-  --name gidd-remdm-loop-remove-self-att \
-  --image registry.rcp.epfl.ch/dllm-sampling/my-toolbox:v0.3 \
-  --gpu 1 \
-  --existing-pvc claimname=course-ee-628-scratch,path=/scratch \
-  --existing-pvc claimname=home,path=/home/mnafez \
-  --command -- bash -c "
-    source /scratch/mnafez/miniconda3/etc/profile.d/conda.sh && \
-    conda activate remdm && \
-    cd /scratch/mnafez/remdm-shortcut-removal && \
-    bash scripts/remdm-loop.sh --remove_self_attn ture
-    "
-```
-
-
-
-```bash
-runai submit \
-  --name gidd-remdm-conf-original \
-  --image registry.rcp.epfl.ch/dllm-sampling/my-toolbox:v0.3 \
-  --gpu 1 \
-  --existing-pvc claimname=course-ee-628-scratch,path=/scratch \
-  --existing-pvc claimname=home,path=/home/mnafez \
-  --command -- bash -c "
-    source /scratch/mnafez/miniconda3/etc/profile.d/conda.sh && \
-    conda activate remdm && \
-    cd /scratch/mnafez/remdm-shortcut-removal && \
-    bash scripts/remdm-conf.sh --remove_self_attn false
-    "
-```
-
-```bash
-runai submit \
-  --name gidd-remdm-conf-remove-self-att \
-  --image registry.rcp.epfl.ch/dllm-sampling/my-toolbox:v0.3 \
-  --gpu 1 \
-  --existing-pvc claimname=course-ee-628-scratch,path=/scratch \
-  --existing-pvc claimname=home,path=/home/mnafez \
-  --command -- bash -c "
-    source /scratch/mnafez/miniconda3/etc/profile.d/conda.sh && \
-    conda activate remdm && \
-    cd /scratch/mnafez/remdm-shortcut-removal && \
-    bash scripts/remdm-conf.sh --remove_self_attn ture
-    "
-```
-
-
-
-```bash
-runai submit \
-  --name gidd-mdlm-original \
-  --image registry.rcp.epfl.ch/dllm-sampling/my-toolbox:v0.3 \
-  --gpu 1 \
-  --existing-pvc claimname=course-ee-628-scratch,path=/scratch \
-  --existing-pvc claimname=home,path=/home/mnafez \
-  --command -- bash -c "
-    source /scratch/mnafez/miniconda3/etc/profile.d/conda.sh && \
-    conda activate remdm && \
-    cd /scratch/mnafez/remdm-shortcut-removal && \
-    bash scripts/mdlm.sh --remove_self_attn false
-    "
-```
-
-```bash
-runai submit \
-  --name gidd-mdlm-remove-self-att \
-  --image registry.rcp.epfl.ch/dllm-sampling/my-toolbox:v0.3 \
-  --gpu 1 \
-  --existing-pvc claimname=course-ee-628-scratch,path=/scratch \
-  --existing-pvc claimname=home,path=/home/mnafez \
-  --command -- bash -c "
-    source /scratch/mnafez/miniconda3/etc/profile.d/conda.sh && \
-    conda activate remdm && \
-    cd /scratch/mnafez/remdm-shortcut-removal && \
-    bash scripts/mdlm.sh --remove_self_attn ture
-    "
-```
-
-
+Refer to readme inside the script folder!
 
 # Evaluation inside intractive session:
 
@@ -211,7 +117,7 @@ python -u -m main \
 
 # Temp command:
 
-
+```bash
 python -u -m main \
     mode=sample_eval \
     loader.batch_size=8 \
@@ -232,4 +138,59 @@ python -u -m main \
     sampling.num_sample_batches=1 \
     sampling.generated_seqs_path=/home/nafez/scratch/remdm-shortcut-removal/outputs/temp_mdlm_T-1024_topp-0.9.json \
     sampling.nucleus_p=0.9 \
-    sampling.sampler="mdlm"
+    sampling.sampler="mdlm" \
+    +model.remove_self_attn=true
+```
+
+```bash
+python -u -m main \
+    mode=sample_eval \
+    loader.batch_size=1 \
+    loader.eval_batch_size=1 \
+    eval.perplexity_batch_size=1 \
+    data=openwebtext-split \
+    model=small \
+    parameterization=subs \
+    backbone=dit \
+    model.length=1024 \
+    eval.checkpoint_path=/home/nafez/scratch/remdm-shortcut-removal/weights/mdlm.ckpt \
+    time_conditioning=false \
+    +wandb.offline=true \
+    hydra.run.dir="${PWD}/outputs/remdm-conf" \
+    T=0 \
+    sampling.steps=1024 \
+    seed=1 \
+    sampling.num_sample_batches=1 \
+    sampling.generated_seqs_path=/home/nafez/scratch/remdm-shortcut-removal/outputs/remdm-conf_T-1024_topp-0.9.json \
+    sampling.nucleus_p=0.9 \
+    sampling.sampler="remdm-conf" \
+    +model.remove_self_attn=true
+```
+
+
+```bash
+python -u -m main \
+    mode=sample_eval \
+    loader.batch_size=8 \
+    loader.eval_batch_size=8 \
+    eval.perplexity_batch_size=1 \
+    data=openwebtext-split \
+    model=small \
+    parameterization=subs \
+    backbone=dit \
+    model.length=1024 \
+    eval.checkpoint_path=/home/nafez/scratch/remdm-shortcut-removal/weights/mdlm.ckpt \
+    time_conditioning=false \
+    +wandb.offline=true \
+    hydra.run.dir="${PWD}/outputs/remasking-via-shortcut-removal" \
+    T=0 \
+    sampling.steps=1024 \
+    seed=1 \
+    sampling.num_sample_batches=1 \
+    sampling.generated_seqs_path=/home/nafez/scratch/remdm-shortcut-removal/outputs/remdm-conf_T-1024_topp-0.9.json \
+    sampling.nucleus_p=0.9 \
+    sampling.sampler="remasking-via-shortcut-removal" \
+    +sampling.revise_step=true \
+    +model.remove_self_attn=true \
+    +sampling.mask_embedding_blending=true 
+```
