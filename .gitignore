@@ -6,3 +6,5 @@ data/
 weights/
 
 text.txt
+text_clean.txt
+text_not_clean.txt

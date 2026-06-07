@@ -4,7 +4,7 @@ python calculate_real_text_entropy.py \
     +sampling.revise_step=false \
     +model.remove_self_attn=false \
     +sampling.mask_embedding_blending=false \
-    +text_path=/home/nafez/scratch/remdm-shortcut-removal/text.txt
+    +text_path=/home/nafez/scratch/remdm-shortcut-removal/text_clean.txt
 '''
 
 import os

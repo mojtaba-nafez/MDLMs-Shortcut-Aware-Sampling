@@ -5,7 +5,7 @@ python calculate_training_entropy.py \
     +sampling.revise_step=false \
     +model.remove_self_attn=false \
     +sampling.mask_embedding_blending=false \
-    data=lm1b
+    data=lm1b-gpt2
 '''
 
 import os
