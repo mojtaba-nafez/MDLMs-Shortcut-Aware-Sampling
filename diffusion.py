@@ -828,15 +828,19 @@ class Diffusion(L.LightningModule):
             if len(idx) == 0:
                 continue
             if (step > 300) and revise_step:
+            # if (step > 300 and step < 900) and revise_step:
               k = min(2, len(idx))
             else:
               k = min(1, len(idx))
+            
             conf = torch.rand(conf.shape).cuda()
+            
             scores = conf[b, idx]
             chosen = idx[torch.topk(scores, k=k).indices]
             xs[b, chosen] = pred[b, chosen]
 
         if (step > 300) and revise_step:
+        # if (step > 300 and step < 900) and revise_step:
             p_x0_2 = self.forward(xs, sigma_t, revise_step=revise_step, mask_embedding_blending=mask_embedding_blending).exp()
             pred_tokens = p_x0_2.argmax(dim=-1)
             _, conf = _sample_categorical_v2(p_x0_2)

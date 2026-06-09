@@ -212,9 +212,10 @@ class LabelEmbedder(nn.Module):
 
 
 class DDiTBlock(nn.Module):
-  def __init__(self, dim, n_heads, cond_dim, mlp_ratio=4, dropout=0.1):
+  def __init__(self, dim, n_heads, cond_dim, layer_idx, mlp_ratio=4, dropout=0.1):
     super().__init__()
     self.n_heads = n_heads
+    self.layer_idx = layer_idx
 
     self.norm1 = LayerNorm(dim)
     self.attn_qkv = nn.Linear(dim, 3 * dim, bias=False)
@@ -344,7 +345,8 @@ class DDiTBlock(nn.Module):
 
     idx = torch.arange(seq_len, device=q.device)
 
-    if remove_self_attn:
+    if remove_self_attn and (self.layer_idx > 6):
+    # if remove_self_attn:
         # # Prevent token i attending to itself
         attn_bias[idx, idx] = torch.finfo(q.dtype).min
 
@@ -457,10 +459,11 @@ class DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
       config.model.hidden_size // config.model.n_heads)
 
     blocks = []
-    for _ in range(config.model.n_blocks):
+    for ii in range(config.model.n_blocks):
       blocks.append(DDiTBlock(config.model.hidden_size,
                               config.model.n_heads,
                               config.model.cond_dim,
+                              layer_idx=ii,
                               dropout=config.model.dropout))
     self.blocks = nn.ModuleList(blocks)
 
@@ -489,6 +492,7 @@ class DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
         mask_token_emb = self.vocab_embed([mask_id])
         mixed_x = ((1 - mask_weight) * x) + (mask_weight * mask_token_emb.view(1, 1, -1))
         x = mixed_x
+        # x = torch.where(not_already_masked, mixed_x, x)
 
     c = F.silu(self.sigma_map(sigma))
 

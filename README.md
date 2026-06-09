@@ -192,5 +192,5 @@ python -u -m main \
     sampling.sampler="remasking-via-shortcut-removal" \
     +sampling.revise_step=true \
     +model.remove_self_attn=true \
-    +sampling.mask_embedding_blending=true 
+    +sampling.mask_embedding_blending=true
 ```
