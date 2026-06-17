@@ -486,7 +486,7 @@ class DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     # print("indices:", indices)
     x = self.vocab_embed(indices)
     mask_id = 50257
-    mask_weight = 0.4
+    mask_weight = 0.3
     if mask_embedding_blending:
         not_already_masked = (indices != mask_id).unsqueeze(-1)
         mask_token_emb = self.vocab_embed([mask_id])
