@@ -9,6 +9,27 @@ The implementation includes:
 * ReMDM baselines
 * Evaluation scripts for MDLM and SEDD
 
+# Getting Started
+v
+To get started, create a conda environment containing the required dependencies.
+
+```bash
+conda create -n duo python=3.12
+conda activate duo
+conda install nvidia/label/cuda-12.4.0::cuda-toolkit
+pip install -r requirements.txt
+pip install flash_attn==2.7.4.post1
+```
+
+# Checkpoints
+
+We use the publicly available checkpoints released by the authors of the [DUO Repository](https://github.com/s-sahoo/duo).
+
+* **Baselines** (SEDD, MDLM): Trained on OpenWebText
+  * [Google Drive folder](https://drive.google.com/drive/folders/16LuuptK7Xfk-vzhQYZBZ0SA-B-BFluau?usp=sharing) — download `mdlm.ckpt`, `sedd.ckpt`.
+
+
+
 # MDLM
 
 ## Shortcut-Aware Sampling (SAS)
