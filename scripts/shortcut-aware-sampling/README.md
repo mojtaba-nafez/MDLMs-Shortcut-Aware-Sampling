@@ -196,3 +196,98 @@ runai submit \
     "
 ```
 
+
+
+# Temperal Command:
+
+```bash
+runai submit \
+  --name ablation-mdlm \
+  --image registry.rcp.epfl.ch/dllm-sampling/my-toolbox:v0.3 \
+  --gpu 1 \
+  --backoff-limit 0 \
+  --existing-pvc claimname=course-ee-628-scratch,path=/scratch \
+  --existing-pvc claimname=home,path=/home/mnafez \
+  --command -- bash -c "
+    source /scratch/mnafez/miniconda3/etc/profile.d/conda.sh && \
+    conda activate remdm && \
+    cd /scratch/mnafez/remdm-shortcut-removal && \
+    bash scripts/shortcut-aware-sampling/ablation_mdlm.sh
+    "
+```
+```bash
+runai submit \
+  --name ablation-sedd \
+  --image registry.rcp.epfl.ch/dllm-sampling/my-toolbox:v0.3 \
+  --gpu 1 \
+  --backoff-limit 0 \
+  --existing-pvc claimname=course-ee-628-scratch,path=/scratch \
+  --existing-pvc claimname=home,path=/home/mnafez \
+  --command -- bash -c "
+    source /scratch/mnafez/miniconda3/etc/profile.d/conda.sh && \
+    conda activate remdm && \
+    cd /scratch/mnafez/remdm-shortcut-removal && \
+    bash scripts/shortcut-aware-sampling/ablation_sedd.sh
+    "
+```
+```bash
+runai submit \
+  --name ablation-sedd-remdm \
+  --image registry.rcp.epfl.ch/dllm-sampling/my-toolbox:v0.3 \
+  --gpu 1 \
+  --backoff-limit 0 \
+  --existing-pvc claimname=course-ee-628-scratch,path=/scratch \
+  --existing-pvc claimname=home,path=/home/mnafez \
+  --command -- bash -c "
+    source /scratch/mnafez/miniconda3/etc/profile.d/conda.sh && \
+    conda activate remdm && \
+    cd /scratch/mnafez/remdm-shortcut-removal && \
+    bash scripts/shortcut-aware-sampling/ablation_sedd_remdm.sh
+    "
+```
+```bash
+runai submit \
+  --name ablation-sedd-original \
+  --image registry.rcp.epfl.ch/dllm-sampling/my-toolbox:v0.3 \
+  --gpu 1 \
+  --backoff-limit 0 \
+  --existing-pvc claimname=course-ee-628-scratch,path=/scratch \
+  --existing-pvc claimname=home,path=/home/mnafez \
+  --command -- bash -c "
+    source /scratch/mnafez/miniconda3/etc/profile.d/conda.sh && \
+    conda activate remdm && \
+    cd /scratch/mnafez/remdm-shortcut-removal && \
+    bash scripts/shortcut-aware-sampling/ablation_sedd_original.sh
+    "
+```
+```bash
+runai submit \
+  --name ablation-sedd-cap \
+  --image registry.rcp.epfl.ch/dllm-sampling/my-toolbox:v0.3 \
+  --gpu 1 \
+  --backoff-limit 0 \
+  --existing-pvc claimname=course-ee-628-scratch,path=/scratch \
+  --existing-pvc claimname=home,path=/home/mnafez \
+  --command -- bash -c "
+    source /scratch/mnafez/miniconda3/etc/profile.d/conda.sh && \
+    conda activate remdm && \
+    cd /scratch/mnafez/remdm-shortcut-removal && \
+    bash scripts/shortcut-aware-sampling/ablation_sedd_remdm_cap.sh
+    "
+```
+
+```bash
+runai submit \
+  --name sas-component-ablation \
+  --image registry.rcp.epfl.ch/dllm-sampling/my-toolbox:v0.3 \
+  --gpu 1 \
+  --backoff-limit 0 \
+  --existing-pvc claimname=course-ee-628-scratch,path=/scratch \
+  --existing-pvc claimname=home,path=/home/mnafez \
+  --command -- bash -c "
+    source /scratch/mnafez/miniconda3/etc/profile.d/conda.sh && \
+    conda activate remdm && \
+    cd /scratch/mnafez/remdm-shortcut-removal && \
+    bash scripts/shortcut-aware-sampling/sas_component_ablation.sh
+    "
+```

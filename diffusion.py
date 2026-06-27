@@ -822,24 +822,43 @@ class Diffusion(L.LightningModule):
         pred, conf = _sample_categorical_v2(p_x0)
         xs = x.clone()
         B, L = x.shape
+        total_steps = self.config.sampling.steps
+        each_step_change = L / total_steps
+        step_down = L // total_steps
+        step_up = step_down + 1 
+        num_up_steps = L % total_steps         
+        if step < num_up_steps:
+            base = step_up
+        else:
+            base = step_down
+        default_per_step_unmasking = max(1,base)
+        remasking_start_step = int(total_steps * 0.25)
+        min_remask = 2
+        remasking_mode_per_step_unmasking = base + max(min_remask, int(1.0 * each_step_change)) 
+        remasking_mode_per_step_remasking = max(min_remask, int(1.0 * each_step_change))
+        # print("default_per_step_unmasking", default_per_step_unmasking)
+        # print("remasking_start_step", remasking_start_step)
+        # print("remasking_mode_per_step_unmasking", remasking_mode_per_step_unmasking)
+        # print("remasking_mode_per_step_remasking", remasking_mode_per_step_remasking)
         mask_flag = (x == self.mask_index)
         for b in range(B):
             idx = torch.where(mask_flag[b])[0]
             if len(idx) == 0:
                 continue
-            if (step > 300) and revise_step:
+            if (step > remasking_start_step) and revise_step:
             # if (step > 300 and step < 900) and revise_step:
-              k = min(2, len(idx))
+              k = min(remasking_mode_per_step_unmasking, len(idx))
+              print(f"step: {step} - remasking_mode_per_step_unmasking: {remasking_mode_per_step_unmasking} - num of un-masked tokens: {k}")
             else:
-              k = min(1, len(idx))
-            
+              k = min(default_per_step_unmasking, len(idx))
+              print(f"step: {step} - default_per_step_unmasking: {default_per_step_unmasking} - num of un-masked tokens: {k}")
             conf = torch.rand(conf.shape).cuda()
             
             scores = conf[b, idx]
             chosen = idx[torch.topk(scores, k=k).indices]
             xs[b, chosen] = pred[b, chosen]
 
-        if (step > 300) and revise_step:
+        if (step > remasking_start_step) and revise_step and (step < (self.config.sampling.steps-1)):
         # if (step > 300 and step < 900) and revise_step:
             p_x0_2 = self.forward(xs, sigma_t, revise_step=revise_step, mask_embedding_blending=mask_embedding_blending).exp()
             pred_tokens = p_x0_2.argmax(dim=-1)
@@ -857,7 +876,9 @@ class Diffusion(L.LightningModule):
                 if len(valid_idx) == 0:
                     continue
                 scores = conf[b, valid_idx]
-                remask_pos = valid_idx[torch.topk(scores, k=1, largest=False).indices]
+                k = min(remasking_mode_per_step_remasking, len(scores))
+                print(f"step {step} - remasking_mode_per_step_remasking: {remasking_mode_per_step_remasking} - num of re-masked tokens for next step: {k}")
+                remask_pos = valid_idx[torch.topk(scores, k=k, largest=False).indices]
                 # remask_pos = valid_idx[torch.argmin(scores)]
                 xs[b, remask_pos] = self.mask_index
               
@@ -1276,8 +1297,9 @@ class Diffusion(L.LightningModule):
         else:
           x = self._analytic_update(x, t, dt)
 
-    print(f"total mask→word: {total_mask_to_word}, total word→mask: {total_word_to_mask}")
-    
+    # print(f"total mask→word: {total_mask_to_word}, total word→mask: {total_word_to_mask}")
+    print("Final remaining masks:", (x == self.mask_index).sum())
+
     if self.config.sampling.noise_removal:
       t = min_t * torch.ones(x.shape[0], 1,
                                      device=self.device)
